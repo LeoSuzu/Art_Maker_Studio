@@ -1,51 +1,37 @@
-from turtle import Turtle, Screen
 import random
+import turtle as t
+
 
 class CircleArt:
-    def __init__(self):
-        # Canvas settings and screen size 720dpi
-        self.screen = Screen()
-        self.screen.setup(2560, 1600)
-        self.screen.screensize(1080, 720)
-        self.screen.colormode(255)
-
-        # Turtle module settings
-        self.turtle = Turtle()
-        self.turtle.speed("fastest")
-        self.turtle.hideturtle()
-        self.turtle.pensize(50)
+    def __init__(self, screen, canvas_width, canvas_height):
+        self.screen = screen
+        self.canvas_width = canvas_width
+        self.canvas_height = canvas_height
+        self.artist = t.RawTurtle(screen)
+        self.artist.speed("fastest")
+        self.artist.hideturtle()
 
     def position(self):
-        """
-        Generates a random position within a certain range.
-        Returns:
-            tuple: x, y coordinates of the position.
-        """
-        position_x = random.randint(-600, 600)
-        position_y = random.randint(-400, 400)
-        new_position = (position_x, position_y)
-        return new_position
+        position_x = random.randint(int(-self.canvas_width / 2) + 90, int(self.canvas_width / 2) - 90)
+        position_y = random.randint(int(-self.canvas_height / 2) + 90, int(self.canvas_height / 2) - 90)
+        return position_x, position_y
 
     def draw_art(self, rgb_colors, circle_count):
-        """
-        Draws the circle art.
-        Args:
-            rgb_colors (list): List of RGB colors.
-            circle_count (int): Number of circles to draw.
-        """
-        for i in range(int(circle_count)):
-            self.turtle.speed("fastest")
-            self.turtle.hideturtle()
-            for _ in range(int(360 / 80)):
-                color = random.choice(rgb_colors)
-                self.turtle.penup()
-                self.turtle.forward(random.randint(50, 150))
-                self.turtle.pencolor(color)
-                self.turtle.pendown()
-                self.turtle.circle(1200)
-                self.turtle.setheading(self.turtle.heading() - 80)
-            self.turtle.penup()
-            self.turtle.setpos(self.position())
-            self.turtle.pendown()
+        max_radius = max(40, min(self.canvas_width, self.canvas_height) // 3)
+        self.screen.colormode(255)
+        self.screen.tracer(0, 0)
 
-        self.screen.exitonclick()
+        for _ in range(int(circle_count)):
+            self.artist.penup()
+            self.artist.goto(self.position())
+            self.artist.setheading(random.randint(0, 360))
+            self.artist.pensize(random.randint(8, 24))
+
+            for _ in range(18):
+                self.artist.pencolor(random.choice(rgb_colors))
+                self.artist.pendown()
+                self.artist.circle(random.randint(max_radius // 3, max_radius))
+                self.artist.left(20)
+                self.artist.penup()
+
+        self.screen.update()
