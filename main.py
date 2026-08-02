@@ -2,48 +2,77 @@ from datetime import datetime
 from pathlib import Path
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 import turtle
 
 import colorgram
-from PIL import Image, ImageGrab, ImageTk
+from PIL import Image, ImageTk
+import subprocess
+import tempfile
 
 from circle_art import CircleArt
 from dot_art import DotArtMaker
 from random_walk_art import RandomWalkArt
+from raster_recorder import RasterRecorder
 
 
 APP_BG = "#0f172a"
 PANEL_BG = "#111827"
 CARD_BG = "#f8fafc"
 ACCENT = "#f97316"
-CANVAS_BG = "#fffaf0"
 TEXT_DARK = "#0f172a"
 TEXT_LIGHT = "#e5eefc"
 APP_NAME = "Art Maker Studio"
 OUTPUT_DIR = Path.home() / "ArtMakerStudioExports"
-CANVAS_WIDTH = 980
-CANVAS_HEIGHT = 700
+
+# Canvas dimensions based on art type and settings
+# Format: (width, height)
+# Dot Art's canvas is computed dynamically from the chosen grid (see get_dot_grid /
+# dot_canvas_size below) so it always matches the actual number of rows/cols.
+canvas_sizes = {
+    "Random Walk Art": {
+        "A4": (1600, 900),
+        "A3": (1600, 900),
+        "A2": (1600, 900),
+    },
+    "Circle Art": {
+        "all": (1600, 900),
+    },
+}
+
+DOT_CELL_SIZE = 55
+DOT_CANVAS_MARGIN = 100
+DOT_CANVAS_MIN = 500
+
+# Named colors that Tk (and therefore turtle, which draws through Tk) is
+# guaranteed to understand, offered as quick background presets.
+BACKGROUND_COLOR_CHOICES = [
+    "white", "ivory", "lightyellow", "honeydew", "aliceblue", "lavenderblush",
+    "lightgray", "gainsboro", "black", "midnightblue", "darkslategray", "Custom...",
+]
 
 brightness_threshold = 400
 palette_amount = 50
 filepath = ""
 rgb_colors = []
-turtle_canvas = None
-turtle_screen = None
 
 size_mapping = {
-    "A4": {"steps": 900, "turtles": 42},
-    "A3": {"steps": 1300, "turtles": 54},
-    "A2": {"steps": 1800, "turtles": 66},
+    "A4": {"steps": 150, "turtles": 42},
+    "A3": {"steps": 250, "turtles": 54},
+    "A2": {"steps": 350, "turtles": 66},
 }
 
 
 window = tk.Tk()
 window.title(APP_NAME)
-window.geometry("1500x920")
+# Make the main control window compact (sidebar only) so no large empty area appears
+window.geometry("380x940")
+# Aut resize depend of content
+window.resizable(True, True)
+window.grid_rowconfigure(0, weight=1)
 window.configure(bg=APP_BG)
-window.minsize(1320, 860)
+window.minsize(380, 940)
+    # window.maxsize(380, 1040)  # Removed to allow window to grow
 
 
 style = ttk.Style()
@@ -54,9 +83,9 @@ style.configure("SidebarTitle.TLabel", background=PANEL_BG, foreground="white", 
 style.configure("SidebarText.TLabel", background=PANEL_BG, foreground=TEXT_LIGHT, font=("Avenir Next", 11))
 style.configure("CardTitle.TLabel", background=CARD_BG, foreground=TEXT_DARK, font=("Avenir Next", 16, "bold"))
 style.configure("CardText.TLabel", background=CARD_BG, foreground="#475569", font=("Avenir Next", 10))
-style.configure("Art.TButton", background=ACCENT, foreground="white", borderwidth=0, focusthickness=0, focuscolor=ACCENT, font=("Avenir Next", 11, "bold"), padding=(14, 10))
+style.configure("Art.TButton", background=ACCENT, foreground="white", borderwidth=0, focusthickness=0, focuscolor=ACCENT, font=("Avenir Next", 11, "bold"), padding=(12, 8))
 style.map("Art.TButton", background=[("active", "#ea580c")])
-style.configure("Secondary.TButton", background="#dbe4f0", foreground=TEXT_DARK, borderwidth=0, font=("Avenir Next", 10, "bold"), padding=(12, 9))
+style.configure("Secondary.TButton", background="#dbe4f0", foreground=TEXT_DARK, borderwidth=0, font=("Avenir Next", 10, "bold"), padding=(10, 6))
 style.map("Secondary.TButton", background=[("active", "#c4d2e3")])
 style.configure("Studio.TCombobox", fieldbackground="white", padding=6)
 style.configure("Studio.TCheckbutton", background=PANEL_BG, foreground=TEXT_LIGHT, font=("Avenir Next", 10))
@@ -65,10 +94,18 @@ style.configure("Studio.TCheckbutton", background=PANEL_BG, foreground=TEXT_LIGH
 image_var = tk.StringVar(value="Valitse kuva väripaletin lähteeksi")
 status_var = tk.StringVar(value="Lataa kuva ja valitse taidetyyli.")
 art_var = tk.StringVar(value="Dot Art")
-dot_var = tk.StringVar(value="100")
+dot_var = tk.StringVar(value="100 - Square")
+dot_grid_config = {
+    "100": {"cols": 10, "rows": 10},
+    "200": {"cols": 20, "rows": 10},
+    "300": {"cols": 20, "rows": 15},
+}
 size_var = tk.StringVar(value="A3")
-circle_var = tk.StringVar(value="7")
-autosave_var = tk.BooleanVar(value=True)
+circle_count_var = tk.IntVar(value=7)
+circle_thickness_var = tk.IntVar(value=6)
+circle_size_var = tk.IntVar(value=120)
+autosave_var = tk.BooleanVar(value=False)
+bg_color_var = tk.StringVar(value="white")
 
 
 def get_output_dir():
@@ -77,30 +114,120 @@ def get_output_dir():
     return OUTPUT_DIR
 
 
+def get_dot_grid(sel):
+    """Parse a dot-art combobox value like '64 - Square' or
+    '120 (10x12) - Rectangle' into (dot_count, cols, rows).
+
+    Computing the grid here (instead of looking it up in a separate table
+    keyed by the full label string) is what keeps the canvas size and the
+    actual dot grid in sync — previously the lookup table's keys didn't
+    match the combobox values, so the canvas defaulted to a fixed 600x600
+    square no matter which option was picked.
+    """
+    import re
+    import math
+
+    m = re.search(r"(\d+)", sel)
+    dot_count = int(m.group(1)) if m else 100
+
+    dims = re.search(r"\((\d+)x(\d+)\)", sel)
+    if dims:
+        cols, rows = int(dims.group(1)), int(dims.group(2))
+    else:
+        size = max(1, math.ceil(math.sqrt(dot_count)))
+        cols, rows = size, size
+
+    return dot_count, cols, rows
+
+
+def dot_canvas_size(sel):
+    _dot_count, cols, rows = get_dot_grid(sel)
+    width = max(DOT_CANVAS_MIN, cols * DOT_CELL_SIZE + DOT_CANVAS_MARGIN)
+    height = max(DOT_CANVAS_MIN, rows * DOT_CELL_SIZE + DOT_CANVAS_MARGIN)
+    return width, height
+
+
 def create_turtle_surface():
-    global turtle_canvas, turtle_screen
+    """Create a new turtle screen for drawing art"""
+    # Use turtle module's native window management instead of embedding in tkinter
+    # This avoids the TurtleScreen + Toplevel incompatibility issue
+    # Get or create the turtle screen and reset it so each run starts fresh.
+    # Handle the case where the previous turtle window was closed by recreating the screen.
+    try:
+        turtle_screen = turtle.getscreen()
+        # ensure canvas exists; will raise if screen was closed
+        _ = turtle_screen.getcanvas()
+        try:
+            # clear() removes every turtle that was ever created on this
+            # screen. reset() (the old code path) instead resets each
+            # leftover turtle to its initial state, which means showturtle()
+            # — so stray turtles from previous runs reappeared as visible
+            # arrow cursors sitting at the canvas center. clear() avoids that.
+            turtle_screen.clear()
+        except Exception:
+            try:
+                turtle_screen.reset()
+            except Exception:
+                pass
+    except Exception:
+        # previous screen missing or closed; create a fresh one
+        try:
+            turtle_screen = turtle.Screen()
+        except Exception:
+            # Last resort: create an implicit Tk root then a screen
+            import tkinter as _tk
 
-    if turtle_canvas is not None:
-        turtle_canvas.destroy()
+            _root = _tk.Tk()
+            _root.withdraw()
+            turtle_screen = turtle.Screen()
 
-    turtle_canvas = tk.Canvas(
-        canvas_host,
-        width=CANVAS_WIDTH,
-        height=CANVAS_HEIGHT,
-        bg=CANVAS_BG,
-        bd=0,
-        highlightthickness=0,
-    )
-    turtle_canvas.pack(fill="both", expand=True, padx=24, pady=24)
-
-    turtle_screen = turtle.TurtleScreen(turtle_canvas)
-    turtle_screen.bgcolor(CANVAS_BG)
+    turtle_screen.bgcolor(bg_color_var.get())
     turtle_screen.colormode(255)
     turtle_screen.tracer(0, 0)
 
+    # Determine canvas size based on current art type and settings
+    art_type = art_var.get()
+    if art_type == "Dot Art":
+        canvas_width, canvas_height = dot_canvas_size(dot_var.get())
+    elif art_type == "Random Walk Art":
+        key = size_var.get()
+        canvas_width, canvas_height = canvas_sizes["Random Walk Art"].get(key, (1000, 800))
+    else:  # Circle Art
+        canvas_width, canvas_height = canvas_sizes["Circle Art"]["all"]
+
+    # Setup the window
+    turtle_screen.setup(width=canvas_width, height=canvas_height)
+    turtle_screen.title(f"{APP_NAME} - {art_type}")
+
+    # Set up world coordinates centered at (0, 0)
+    half_width = canvas_width / 2
+    half_height = canvas_height / 2
+    turtle_screen.setworldcoordinates(-half_width, -half_height, half_width, half_height)
+
+    return turtle_screen, canvas_width, canvas_height
+
 
 def extract_palette(selected_path):
-    colors = colorgram.extract(selected_path, palette_amount)
+    # colorgram.extract walks every pixel in pure Python, so on a large photo
+    # (e.g. a 12MP phone picture) it can take a very long time. Downscaling
+    # to a small thumbnail first keeps the same color palette while cutting
+    # the pixel count down by orders of magnitude, making this near-instant.
+    tmp_path = None
+    try:
+        with Image.open(selected_path) as image:
+            thumbnail = image.convert("RGB")
+            thumbnail.thumbnail((300, 300), Image.LANCZOS)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                tmp_path = tmp_file.name
+            thumbnail.save(tmp_path)
+        colors = colorgram.extract(tmp_path, palette_amount)
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
+
     palette = []
 
     for color in colors:
@@ -120,12 +247,18 @@ def extract_palette(selected_path):
     return palette
 
 
+PREVIEW_MAX_WIDTH = 290
+PREVIEW_MAX_HEIGHT = 220
+
+
 def show_image_preview(selected_path):
+    # The preview box has a fixed size (see preview_shell's pack_propagate(False)
+    # below), so we letterbox the thumbnail to fit inside it instead of resizing
+    # the window to match the photo's aspect ratio — a tall portrait photo used
+    # to inflate the window height enough to push the buttons off-screen.
     image = Image.open(selected_path)
-    width, height = image.size
-    preview_width = 290
-    preview_height = int(height * preview_width / width)
-    preview = image.resize((preview_width, preview_height), Image.LANCZOS)
+    preview = image.copy()
+    preview.thumbnail((PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT), Image.LANCZOS)
     photo = ImageTk.PhotoImage(preview)
     preview_label.configure(image=photo, text="")
     preview_label.image = photo
@@ -170,7 +303,18 @@ def update_parameter_controls(*_args):
         ttk.Combobox(
             parameter_row,
             textvariable=dot_var,
-            values=["100", "225", "400"],
+            values=[
+                "64 - Square",
+                "100 - Square",
+                "196 - Square",
+                "256 - Square",
+                "361 - Square",
+                "120 (10x12) - Rectangle",
+                "180 (12x15) - Rectangle",
+                "240 (12x20) - Rectangle",
+                "300 (15x20) - Rectangle",
+                "320 (16x20) - Rectangle",
+            ],
             state="readonly",
             style="Studio.TCombobox",
         ).pack(fill="x", pady=(6, 0))
@@ -184,42 +328,136 @@ def update_parameter_controls(*_args):
             style="Studio.TCombobox",
         ).pack(fill="x", pady=(6, 0))
     else:
-        ttk.Label(parameter_row, text="Ympyräryhmien määrä", style="SidebarText.TLabel").pack(anchor="w")
-        ttk.Combobox(
-            parameter_row,
-            textvariable=circle_var,
-            values=["5", "7", "10", "14"],
-            state="readonly",
-            style="Studio.TCombobox",
-        ).pack(fill="x", pady=(6, 0))
+        def add_slider(label_text, variable, from_, to_):
+            ttk.Label(parameter_row, text=label_text, style="SidebarText.TLabel").pack(anchor="w", pady=(8, 0))
+            tk.Scale(
+                parameter_row,
+                variable=variable,
+                from_=from_,
+                to=to_,
+                orient="horizontal",
+                bg=PANEL_BG,
+                fg=TEXT_LIGHT,
+                troughcolor="#1e293b",
+                highlightthickness=0,
+                activebackground=ACCENT,
+                showvalue=True,
+            ).pack(fill="x")
+
+        add_slider("Ympyröiden määrä", circle_count_var, 5, 60)
+        add_slider("Viivan paksuus", circle_thickness_var, 1, 25)
+        add_slider("Ympyrän koko (säde)", circle_size_var, 20, 400)
 
 
-def export_art():
-    if turtle_canvas is None:
-        raise RuntimeError("Canvasia ei ole vielä luotu.")
+def on_background_color_selected(*_args):
+    selected = bg_color_var.get()
+    if selected != "Custom...":
+        bg_swatch.configure(bg=selected)
+        return
 
-    output_dir = get_output_dir()
-    output_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    base_name = f"{art_var.get().lower().replace(' ', '_')}-{timestamp}"
+    # askcolor returns ((r, g, b), "#rrggbb") or (None, None) if cancelled
+    _rgb, hex_color = colorchooser.askcolor(title="Valitse taustaväri")
+    if hex_color:
+        if hex_color not in background_combo["values"]:
+            background_combo["values"] = list(background_combo["values"]) + [hex_color]
+        bg_color_var.set(hex_color)
+        bg_swatch.configure(bg=hex_color)
+    else:
+        # user cancelled the picker — fall back to the previous color
+        bg_color_var.set(bg_swatch["bg"])
 
-    window.update()
 
-    postscript_path = output_dir / f"{base_name}.ps"
-    turtle_canvas.postscript(file=postscript_path, colormode="color")
+# Holds the RasterRecorder for whatever was drawn most recently, so it can be
+# exported without ever touching the turtle window's pixels (see export_art).
+current_recorder = {"recorder": None}
 
-    x = turtle_canvas.winfo_rootx()
-    y = turtle_canvas.winfo_rooty()
-    x1 = x + turtle_canvas.winfo_width()
-    y1 = y + turtle_canvas.winfo_height()
 
-    image = ImageGrab.grab(bbox=(x, y, x1, y1))
+def export_art(output_dir: Path | None = None, base_name: str | None = None):
+    """Export the most recently drawn art as PNG and PDF.
+
+    If output_dir and base_name are provided, use them; otherwise use the default output folder
+    and a timestamped filename.
+    Returns a list of the file paths that were successfully written.
+    """
+    recorder = current_recorder["recorder"]
+    if recorder is None:
+        raise RuntimeError("Ei piirrettyä taidetta tallennettavaksi.")
+
+    if output_dir is None:
+        output_dir = get_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if base_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base_name = f"{art_var.get().lower().replace(' ', '_')}-{timestamp}"
+
+    saved_paths = []
+
     png_path = output_dir / f"{base_name}.png"
-    jpg_path = output_dir / f"{base_name}.jpg"
-    image.save(png_path)
-    image.convert("RGB").save(jpg_path, quality=95)
+    recorder.save_png(png_path)
+    saved_paths.append(png_path)
 
-    return png_path, jpg_path, postscript_path
+    pdf_path = output_dir / f"{base_name}.pdf"
+    recorder.save_pdf(pdf_path)
+    saved_paths.append(pdf_path)
+
+    return saved_paths
+
+
+# Animation pacing: every art type now draws step-by-step instead of all at
+# once, so the user can actually watch it happen and stop it whenever the
+# result looks good. ANIMATION_TARGET_MS is the rough total duration we aim
+# for; the per-step delay is derived from how many steps that art job has.
+ANIMATION_TARGET_MS = 30000
+MIN_STEP_DELAY_MS = 15
+MAX_STEP_DELAY_MS = 400
+
+active_job = {"running": False, "stop": False, "after_id": None}
+
+
+def set_drawing_state(is_drawing):
+    state = "disabled" if is_drawing else "normal"
+    create_button.configure(state=state)
+    choose_button.configure(state=state)
+    stop_button.configure(state=("normal" if is_drawing else "disabled"))
+
+
+def stop_art():
+    """Stop the current animation early and keep whatever has been drawn."""
+    active_job["stop"] = True
+
+
+def run_animated(generator, total_steps, on_finish):
+    delay_ms = MIN_STEP_DELAY_MS
+    if total_steps > 0:
+        delay_ms = max(MIN_STEP_DELAY_MS, min(MAX_STEP_DELAY_MS, ANIMATION_TARGET_MS // total_steps))
+
+    active_job["running"] = True
+    active_job["stop"] = False
+
+    progress = {"done": 0}
+
+    def step():
+        if active_job["stop"]:
+            finish()
+            return
+        try:
+            next(generator)
+        except StopIteration:
+            finish()
+            return
+        progress["done"] += 1
+        if total_steps > 0:
+            percent = min(100, int(progress["done"] * 100 / total_steps))
+            status_var.set(f"Piirretään... {percent}%  (paina Pysäytä lopettaaksesi heti)")
+        active_job["after_id"] = window.after(delay_ms, step)
+
+    def finish():
+        active_job["running"] = False
+        active_job["after_id"] = None
+        on_finish()
+
+    step()
 
 
 def create_art():
@@ -227,51 +465,97 @@ def create_art():
         messagebox.showerror("Virhe", "Valitse ensin kuva, jotta värit saadaan poimittua.")
         return
 
-    create_turtle_surface()
+    if active_job["running"]:
+        return
+
+    turtle_screen, canvas_width, canvas_height = create_turtle_surface()
     status_var.set("Piirretään uutta versiota...")
     window.update_idletasks()
 
+    recorder = RasterRecorder(canvas_width, canvas_height, bg=bg_color_var.get())
+    current_recorder["recorder"] = recorder
+
+    selected_art = art_var.get()
     try:
-        selected_art = art_var.get()
         if selected_art == "Dot Art":
-            DotArtMaker(turtle_screen, CANVAS_WIDTH, CANVAS_HEIGHT, rgb_colors, dot_var.get()).create_dot_art()
+            dot_count, cols, rows = get_dot_grid(dot_var.get())
+            maker = DotArtMaker(turtle_screen, canvas_width, canvas_height, rgb_colors, dot_count)
+            maker.grid_cols, maker.grid_rows = cols, rows
+            generator = maker.draw_steps(recorder=recorder)
+            total_steps = maker.total_dots()
         elif selected_art == "Random Walk Art":
             size_config = size_mapping[size_var.get()]
-            RandomWalkArt(
+            walker = RandomWalkArt(
                 turtle_screen,
-                CANVAS_WIDTH,
-                CANVAS_HEIGHT,
+                canvas_width,
+                canvas_height,
                 turtle_count=size_config["turtles"],
-            ).random_walk(size_config["steps"], rgb_colors)
+            )
+            generator = walker.draw_steps(size_config["steps"], rgb_colors, recorder=recorder)
+            total_steps = size_config["steps"]
         else:
-            CircleArt(turtle_screen, CANVAS_WIDTH, CANVAS_HEIGHT).draw_art(rgb_colors, circle_var.get())
-
-        saved_copy = ""
-        if autosave_var.get():
-            _, jpg_path, _ = export_art()
-            saved_copy = f" Tallennettu automaattisesti: {jpg_path.name}"
-
-        status_var.set(f"{selected_art} valmis.{saved_copy}")
+            circle_count = circle_count_var.get()
+            thickness = circle_thickness_var.get()
+            radius = circle_size_var.get()
+            circle_art = CircleArt(turtle_screen, canvas_width, canvas_height)
+            generator = circle_art.draw_steps(rgb_colors, circle_count, thickness, radius, recorder=recorder)
+            total_steps = circle_art.total_strokes(circle_count)
     except Exception as exc:
         status_var.set("Piirtäminen epäonnistui.")
         messagebox.showerror("Virhe", f"Piirtäminen epäonnistui:\n{exc}")
+        return
+
+    set_drawing_state(True)
+
+    def on_finish():
+        set_drawing_state(False)
+        status_var.set(f"{selected_art} valmis.")
+        if autosave_var.get():
+            save_current_art()
+
+    run_animated(generator, total_steps, on_finish)
 
 
 def save_current_art():
-    if turtle_canvas is None:
-        messagebox.showerror("Virhe", "Luo ensin art, jotta sen voi tallentaa.")
+    if current_recorder["recorder"] is None:
+        messagebox.showerror("Virhe", "Ei piirrettyä taidetta tallennettavaksi. Paina ensin 'Luo Art'.")
         return
 
+    # Default file name
+    default_name = f"{art_var.get().lower().replace(' ', '_')}.png"
+    save_path = filedialog.asksaveasfilename(
+        title="Tallenna kuva nimellä...",
+        defaultextension=".png",
+        initialfile=default_name,
+        filetypes=[("PNG-kuva", "*.png"), ("PDF-asiakirja", "*.pdf")],
+    )
+    if not save_path:
+        return
+
+    chosen = Path(save_path)
+    output_dir = chosen.parent
+    base_name = chosen.stem
+
     try:
-        png_path, jpg_path, postscript_path = export_art()
+        saved_paths = export_art(output_dir=output_dir, base_name=base_name)
     except Exception as exc:
         messagebox.showerror("Virhe", f"Tallennus epäonnistui:\n{exc}")
         return
 
-    status_var.set(
-        f"Tallennettu: {png_path.name}, {jpg_path.name} ja {postscript_path.name}"
-    )
+    saved_files = [str(p) for p in saved_paths if p and p.exists()]
 
+    if saved_files:
+        status_var.set(f"Tallennettu: {', '.join(saved_files)}")
+    else:
+        status_var.set("Tallennus epäonnistui.")
+        messagebox.showerror("Virhe", "Kuvan tallennus epäonnistui.")
+        return
+
+    # Open the containing folder in Finder (macOS) so user sees the saved files
+    try:
+        subprocess.run(["open", str(output_dir)])
+    except Exception:
+        pass
 
 def quit_app():
     window.destroy()
@@ -283,9 +567,6 @@ layout.pack(fill="both", expand=True, padx=24, pady=24)
 sidebar = ttk.Frame(layout, style="Sidebar.TFrame", padding=24)
 sidebar.pack(side="left", fill="y")
 
-canvas_card = ttk.Frame(layout, style="CanvasCard.TFrame", padding=0)
-canvas_card.pack(side="right", fill="both", expand=True, padx=(20, 0))
-
 ttk.Label(sidebar, text="Art Maker", style="SidebarTitle.TLabel").pack(anchor="w")
 ttk.Label(
     sidebar,
@@ -294,19 +575,21 @@ ttk.Label(
     wraplength=300,
 ).pack(anchor="w", pady=(6, 20))
 
-ttk.Button(sidebar, text="Valitse kuva", command=choose_image, style="Art.TButton").pack(fill="x")
+choose_button = ttk.Button(sidebar, text="Valitse kuva", command=choose_image, style="Art.TButton")
+choose_button.pack(fill="x")
 ttk.Label(sidebar, textvariable=image_var, style="SidebarText.TLabel", wraplength=300).pack(anchor="w", pady=(10, 16))
 
-preview_shell = tk.Frame(sidebar, bg="#1e293b", bd=0, highlightthickness=0)
+preview_shell = tk.Frame(sidebar, bg="#1e293b", bd=0, highlightthickness=0, height=PREVIEW_MAX_HEIGHT + 24)
 preview_shell.pack(fill="x", pady=(0, 18))
+# Lock the frame's height so a tall/portrait photo can't grow the sidebar and
+# push the buttons below it off-screen — the thumbnail is letterboxed to fit.
+preview_shell.pack_propagate(False)
 preview_label = tk.Label(
     preview_shell,
     text="Kuvan esikatselu",
     bg="#1e293b",
     fg="#cbd5e1",
     font=("Avenir Next", 11, "bold"),
-    width=32,
-    height=12,
 )
 preview_label.pack(fill="both", expand=True, padx=12, pady=12)
 
@@ -319,20 +602,38 @@ ttk.Combobox(
     style="Studio.TCombobox",
 ).pack(fill="x", pady=(6, 18))
 
+ttk.Label(sidebar, text="Taustaväri", style="SidebarText.TLabel").pack(anchor="w")
+background_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
+background_row.pack(fill="x", pady=(6, 18))
+background_combo = ttk.Combobox(
+    background_row,
+    textvariable=bg_color_var,
+    values=BACKGROUND_COLOR_CHOICES,
+    state="readonly",
+    style="Studio.TCombobox",
+)
+background_combo.pack(side="left", fill="x", expand=True)
+bg_swatch = tk.Label(background_row, bg=bg_color_var.get(), width=3, relief="solid", bd=1)
+bg_swatch.pack(side="left", padx=(8, 0))
+bg_color_var.trace_add("write", on_background_color_selected)
+
 parameter_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
 parameter_row.pack(fill="x", pady=(0, 18))
 
 ttk.Checkbutton(
     sidebar,
-    text="Tallenna valmis art automaattisesti",
+    text="Kysy tallennus ennen tallennusta",
     variable=autosave_var,
     style="Studio.TCheckbutton",
 ).pack(anchor="w", pady=(0, 18))
 
 button_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
 button_row.pack(fill="x")
-ttk.Button(button_row, text="Luo Art", command=create_art, style="Art.TButton").pack(fill="x")
-ttk.Button(button_row, text="Tallenna Uudelleen", command=save_current_art, style="Secondary.TButton").pack(fill="x", pady=(10, 0))
+create_button = ttk.Button(button_row, text="Luo Art", command=create_art, style="Art.TButton")
+create_button.pack(fill="x")
+stop_button = ttk.Button(button_row, text="Pysäytä ja näytä tulos", command=stop_art, style="Secondary.TButton", state="disabled")
+stop_button.pack(fill="x", pady=(10, 0))
+ttk.Button(button_row, text="Tallenna kuva", command=save_current_art, style="Secondary.TButton").pack(fill="x", pady=(10, 0))
 ttk.Button(button_row, text="Sulje", command=quit_app, style="Secondary.TButton").pack(fill="x", pady=(10, 0))
 
 status_card = tk.Frame(sidebar, bg="#0b1220")
@@ -349,28 +650,7 @@ tk.Label(
     font=("Avenir Next", 10),
 ).pack(fill="x")
 
-header = tk.Frame(canvas_card, bg=CARD_BG)
-header.pack(fill="x", padx=24, pady=(24, 0))
-tk.Label(
-    header,
-    text="Creative Canvas",
-    bg=CARD_BG,
-    fg=TEXT_DARK,
-    font=("Avenir Next", 22, "bold"),
-).pack(anchor="w")
-tk.Label(
-    header,
-    text="Sama canvas palvelee kaikkia art-malleja, joten tyylin vaihto ei enää kaada sovellusta.",
-    bg=CARD_BG,
-    fg="#64748b",
-    font=("Avenir Next", 11),
-).pack(anchor="w", pady=(4, 0))
-
-canvas_host = tk.Frame(canvas_card, bg="#e2e8f0", bd=0, highlightthickness=0)
-canvas_host.pack(fill="both", expand=True, padx=24, pady=24)
-
 update_parameter_controls()
 art_var.trace_add("write", update_parameter_controls)
-create_turtle_surface()
 
 window.mainloop()
