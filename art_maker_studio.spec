@@ -50,4 +50,9 @@ app = BUNDLE(
     name="ArtMakerStudio.app",
     icon=None,
     bundle_identifier="com.artmaker.studio",
+    info_plist={
+        "CFBundleDisplayName": "Art Maker Studio",
+        "CFBundleShortVersionString": "1.1.0",
+        "NSHighResolutionCapable": True,
+    },
 )

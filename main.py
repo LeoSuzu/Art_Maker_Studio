@@ -65,14 +65,12 @@ size_mapping = {
 
 window = tk.Tk()
 window.title(APP_NAME)
-# Make the main control window compact (sidebar only) so no large empty area appears
-window.geometry("380x940")
-# Aut resize depend of content
 window.resizable(True, True)
-window.grid_rowconfigure(0, weight=1)
 window.configure(bg=APP_BG)
-window.minsize(380, 940)
-    # window.maxsize(380, 1040)  # Removed to allow window to grow
+# The final size is chosen in fit_window_to_screen() once the sidebar exists.
+# The old fixed minsize(380, 940) was taller than the usable height of many
+# Mac screens, so the bottom buttons were cut off with no way to reach them.
+window.minsize(400, 360)
 
 
 style = ttk.Style()
@@ -153,6 +151,10 @@ def create_turtle_surface():
     # This avoids the TurtleScreen + Toplevel incompatibility issue
     # Get or create the turtle screen and reset it so each run starts fresh.
     # Handle the case where the previous turtle window was closed by recreating the screen.
+    # Closing the turtle window sets TurtleScreen._RUNNING = False, which makes the
+    # *next* turtle update raise turtle.Terminator once — even on a brand-new
+    # screen. Re-arm the flag so reopening the drawing window just works.
+    turtle.TurtleScreen._RUNNING = True
     try:
         turtle_screen = turtle.getscreen()
         # ensure canvas exists; will raise if screen was closed
@@ -195,8 +197,17 @@ def create_turtle_surface():
     else:  # Circle Art
         canvas_width, canvas_height = canvas_sizes["Circle Art"]["all"]
 
-    # Setup the window
-    turtle_screen.setup(width=canvas_width, height=canvas_height)
+    # Setup the window. Shrink it (keeping the aspect ratio) if it would not
+    # fit on the screen; world coordinates below stay at full size, so the
+    # drawing just scales down on screen while the PNG/PDF export (made by
+    # RasterRecorder) keeps the full resolution.
+    root = turtle_screen.getcanvas().winfo_toplevel()
+    scale = min(
+        1.0,
+        (root.winfo_screenwidth() - 80) / canvas_width,
+        (root.winfo_screenheight() - 140) / canvas_height,
+    )
+    turtle_screen.setup(width=int(canvas_width * scale), height=int(canvas_height * scale))
     turtle_screen.title(f"{APP_NAME} - {art_type}")
 
     # Set up world coordinates centered at (0, 0)
@@ -256,8 +267,10 @@ def show_image_preview(selected_path):
     # below), so we letterbox the thumbnail to fit inside it instead of resizing
     # the window to match the photo's aspect ratio — a tall portrait photo used
     # to inflate the window height enough to push the buttons off-screen.
-    image = Image.open(selected_path)
-    preview = image.copy()
+    with Image.open(selected_path) as image:
+        # Normalise odd modes (CMYK JPEG, 16-bit PNG, palette images…) that
+        # ImageTk can't display directly.
+        preview = image.convert("RGBA" if "A" in image.getbands() else "RGB")
     preview.thumbnail((PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT), Image.LANCZOS)
     photo = ImageTk.PhotoImage(preview)
     preview_label.configure(image=photo, text="")
@@ -291,62 +304,85 @@ def choose_image():
     show_image_preview(selected_path)
 
 
-def update_parameter_controls(*_args):
-    for widget in parameter_row.winfo_children():
-        widget.destroy()
+DOT_CHOICES = [
+    "64 - Square",
+    "100 - Square",
+    "196 - Square",
+    "256 - Square",
+    "361 - Square",
+    "120 (10x12) - Rectangle",
+    "180 (12x15) - Rectangle",
+    "240 (12x20) - Rectangle",
+    "300 (15x20) - Rectangle",
+    "320 (16x20) - Rectangle",
+]
 
+# One settings panel per art style, built once and then shown/hidden.
+# The old code destroyed and re-created these widgets on every style change;
+# on macOS that could crash Tk (EXC_BAD_ACCESS in Tk_MapWindow during a
+# window redraw), taking the whole app down when switching modes.
+parameter_panels = {}
+
+
+def build_parameter_panels():
     ttk.Label(parameter_row, text="Asetukset", style="SidebarText.TLabel").pack(anchor="w", pady=(0, 8))
 
-    selected_art = art_var.get()
-    if selected_art == "Dot Art":
-        ttk.Label(parameter_row, text="Pisteiden määrä", style="SidebarText.TLabel").pack(anchor="w")
-        ttk.Combobox(
-            parameter_row,
-            textvariable=dot_var,
-            values=[
-                "64 - Square",
-                "100 - Square",
-                "196 - Square",
-                "256 - Square",
-                "361 - Square",
-                "120 (10x12) - Rectangle",
-                "180 (12x15) - Rectangle",
-                "240 (12x20) - Rectangle",
-                "300 (15x20) - Rectangle",
-                "320 (16x20) - Rectangle",
-            ],
-            state="readonly",
-            style="Studio.TCombobox",
-        ).pack(fill="x", pady=(6, 0))
-    elif selected_art == "Random Walk Art":
-        ttk.Label(parameter_row, text="Komposition koko", style="SidebarText.TLabel").pack(anchor="w")
-        ttk.Combobox(
-            parameter_row,
-            textvariable=size_var,
-            values=list(size_mapping.keys()),
-            state="readonly",
-            style="Studio.TCombobox",
-        ).pack(fill="x", pady=(6, 0))
-    else:
-        def add_slider(label_text, variable, from_, to_):
-            ttk.Label(parameter_row, text=label_text, style="SidebarText.TLabel").pack(anchor="w", pady=(8, 0))
-            tk.Scale(
-                parameter_row,
-                variable=variable,
-                from_=from_,
-                to=to_,
-                orient="horizontal",
-                bg=PANEL_BG,
-                fg=TEXT_LIGHT,
-                troughcolor="#1e293b",
-                highlightthickness=0,
-                activebackground=ACCENT,
-                showvalue=True,
-            ).pack(fill="x")
+    dot_panel = ttk.Frame(parameter_row, style="Sidebar.TFrame")
+    ttk.Label(dot_panel, text="Pisteiden määrä", style="SidebarText.TLabel").pack(anchor="w")
+    ttk.Combobox(
+        dot_panel,
+        textvariable=dot_var,
+        values=DOT_CHOICES,
+        state="readonly",
+        style="Studio.TCombobox",
+    ).pack(fill="x", pady=(6, 0))
 
-        add_slider("Ympyröiden määrä", circle_count_var, 5, 60)
-        add_slider("Viivan paksuus", circle_thickness_var, 1, 25)
-        add_slider("Ympyrän koko (säde)", circle_size_var, 20, 400)
+    walk_panel = ttk.Frame(parameter_row, style="Sidebar.TFrame")
+    ttk.Label(walk_panel, text="Komposition koko", style="SidebarText.TLabel").pack(anchor="w")
+    ttk.Combobox(
+        walk_panel,
+        textvariable=size_var,
+        values=list(size_mapping.keys()),
+        state="readonly",
+        style="Studio.TCombobox",
+    ).pack(fill="x", pady=(6, 0))
+
+    circle_panel = ttk.Frame(parameter_row, style="Sidebar.TFrame")
+
+    def add_slider(label_text, variable, from_, to_):
+        ttk.Label(circle_panel, text=label_text, style="SidebarText.TLabel").pack(anchor="w", pady=(8, 0))
+        tk.Scale(
+            circle_panel,
+            variable=variable,
+            from_=from_,
+            to=to_,
+            orient="horizontal",
+            bg=PANEL_BG,
+            fg=TEXT_LIGHT,
+            troughcolor="#1e293b",
+            highlightthickness=0,
+            activebackground=ACCENT,
+            showvalue=True,
+        ).pack(fill="x")
+
+    add_slider("Ympyröiden määrä", circle_count_var, 5, 60)
+    add_slider("Viivan paksuus", circle_thickness_var, 1, 25)
+    add_slider("Ympyrän koko (säde)", circle_size_var, 20, 400)
+
+    parameter_panels.update({
+        "Dot Art": dot_panel,
+        "Random Walk Art": walk_panel,
+        "Circle Art": circle_panel,
+    })
+
+
+def update_parameter_controls(*_args):
+    wanted = parameter_panels.get(art_var.get(), parameter_panels["Circle Art"])
+    for panel in parameter_panels.values():
+        if panel is not wanted and panel.winfo_manager():
+            panel.pack_forget()
+    if not wanted.winfo_manager():
+        wanted.pack(fill="x")
 
 
 def on_background_color_selected(*_args):
@@ -446,16 +482,27 @@ def run_animated(generator, total_steps, on_finish):
         except StopIteration:
             finish()
             return
+        except (tk.TclError, turtle.Terminator):
+            # The user closed the drawing window mid-draw. Previously this
+            # exception escaped the after() callback, leaving active_job
+            # "running" forever and the Luo Art / Valitse kuva buttons
+            # disabled until the app was restarted. Keep what was drawn so
+            # far (the RasterRecorder still has it) and finish normally.
+            finish("Piirtoikkuna suljettiin – tähän asti piirretty tulos on tallessa.")
+            return
+        except Exception as exc:
+            finish(f"Piirtäminen keskeytyi virheeseen: {exc}")
+            return
         progress["done"] += 1
         if total_steps > 0:
             percent = min(100, int(progress["done"] * 100 / total_steps))
             status_var.set(f"Piirretään... {percent}%  (paina Pysäytä lopettaaksesi heti)")
         active_job["after_id"] = window.after(delay_ms, step)
 
-    def finish():
+    def finish(message=None):
         active_job["running"] = False
         active_job["after_id"] = None
-        on_finish()
+        on_finish(message)
 
     step()
 
@@ -468,15 +515,15 @@ def create_art():
     if active_job["running"]:
         return
 
-    turtle_screen, canvas_width, canvas_height = create_turtle_surface()
-    status_var.set("Piirretään uutta versiota...")
-    window.update_idletasks()
-
-    recorder = RasterRecorder(canvas_width, canvas_height, bg=bg_color_var.get())
-    current_recorder["recorder"] = recorder
-
     selected_art = art_var.get()
     try:
+        turtle_screen, canvas_width, canvas_height = create_turtle_surface()
+        status_var.set("Piirretään uutta versiota...")
+        window.update_idletasks()
+
+        recorder = RasterRecorder(canvas_width, canvas_height, bg=bg_color_var.get())
+        current_recorder["recorder"] = recorder
+
         if selected_art == "Dot Art":
             dot_count, cols, rows = get_dot_grid(dot_var.get())
             maker = DotArtMaker(turtle_screen, canvas_width, canvas_height, rgb_colors, dot_count)
@@ -507,10 +554,10 @@ def create_art():
 
     set_drawing_state(True)
 
-    def on_finish():
+    def on_finish(message=None):
         set_drawing_state(False)
-        status_var.set(f"{selected_art} valmis.")
-        if autosave_var.get():
+        status_var.set(message or f"{selected_art} valmis.")
+        if message is None and autosave_var.get():
             save_current_art()
 
     run_animated(generator, total_steps, on_finish)
@@ -562,10 +609,54 @@ def quit_app():
 
 
 layout = tk.Frame(window, bg=APP_BG)
-layout.pack(fill="both", expand=True, padx=24, pady=24)
+layout.pack(fill="both", expand=True, padx=16, pady=16)
 
-sidebar = ttk.Frame(layout, style="Sidebar.TFrame", padding=24)
-sidebar.pack(side="left", fill="y")
+# The sidebar lives inside a scrollable canvas so every control stays
+# reachable even when the screen is shorter than the sidebar.
+sidebar_scrollbar = ttk.Scrollbar(layout, orient="vertical")
+sidebar_canvas = tk.Canvas(
+    layout,
+    bg=PANEL_BG,
+    highlightthickness=0,
+    bd=0,
+    yscrollcommand=sidebar_scrollbar.set,
+)
+sidebar_scrollbar.configure(command=sidebar_canvas.yview)
+sidebar_canvas.pack(side="left", fill="both", expand=True)
+
+sidebar = ttk.Frame(sidebar_canvas, style="Sidebar.TFrame", padding=24)
+sidebar_window = sidebar_canvas.create_window((0, 0), window=sidebar, anchor="nw")
+
+
+def _update_sidebar_scroll(_event=None):
+    sidebar_canvas.configure(scrollregion=sidebar_canvas.bbox("all"))
+    needs_scroll = sidebar.winfo_reqheight() > sidebar_canvas.winfo_height() + 1
+    if needs_scroll and not sidebar_scrollbar.winfo_manager():
+        sidebar_scrollbar.pack(side="right", fill="y", before=sidebar_canvas)
+    elif not needs_scroll and sidebar_scrollbar.winfo_manager():
+        sidebar_scrollbar.pack_forget()
+        sidebar_canvas.yview_moveto(0)
+
+
+def _on_sidebar_canvas_resize(event):
+    sidebar_canvas.itemconfigure(sidebar_window, width=event.width)
+    _update_sidebar_scroll()
+
+
+def _on_mousewheel(event):
+    if not sidebar_scrollbar.winfo_manager():
+        return
+    delta = event.delta
+    # Tk 9 reports wheel deltas in multiples of 120; Tk 8.6 on macOS reports
+    # small raw values. Normalise both to whole scroll units.
+    units = -int(delta / 120) if abs(delta) >= 120 else -delta
+    if units:
+        sidebar_canvas.yview_scroll(units, "units")
+
+
+sidebar.bind("<Configure>", _update_sidebar_scroll)
+sidebar_canvas.bind("<Configure>", _on_sidebar_canvas_resize)
+window.bind_all("<MouseWheel>", _on_mousewheel)
 
 ttk.Label(sidebar, text="Art Maker", style="SidebarTitle.TLabel").pack(anchor="w")
 ttk.Label(
@@ -650,7 +741,28 @@ tk.Label(
     font=("Avenir Next", 10),
 ).pack(fill="x")
 
+build_parameter_panels()
 update_parameter_controls()
 art_var.trace_add("write", update_parameter_controls)
 
+
+def fit_window_to_screen():
+    """Size the window to its content, but never taller than the screen."""
+    window.update_idletasks()
+    # Use the tallest settings panel so switching styles never needs a resize.
+    tallest_panel = max(p.winfo_reqheight() for p in parameter_panels.values())
+    current_panel = max(
+        (p.winfo_reqheight() for p in parameter_panels.values() if p.winfo_manager()),
+        default=0,
+    )
+    content_h = sidebar.winfo_reqheight() + (tallest_panel - current_panel) + 32
+    content_w = sidebar.winfo_reqwidth() + 32 + 16  # + room for the scrollbar
+    # Leave room for the menu bar, the window's title bar and the Dock.
+    max_h = window.winfo_screenheight() - 120
+    width = max(400, content_w)
+    height = max(360, min(content_h, max_h))
+    window.geometry(f"{width}x{height}+40+40")
+
+
+fit_window_to_screen()
 window.mainloop()

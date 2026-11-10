@@ -39,11 +39,14 @@ chmod +x build_mac.sh
 ./build_mac.sh
 ```
 
-Valmis sovellus löytyy:
+Valmis sovellus ja asennuslevykuva löytyvät:
 
 ```text
 dist/ArtMakerStudio.app
+dist/ArtMakerStudio-<päivämäärä>.dmg
 ```
+
+Build-scripti käyttää Pythonia, jossa on **Tk 9** (asentaa tarvittaessa `uv python install` -komennolla natiivin Python 3.13:n). Vanhempi Tk 8.6 (esim. python.org:n Python 3.11 -asennuksessa) kaatuu uusissa macOS-versioissa *Bus error* -virheeseen, kun ikkunoiden asettelu muuttuu (taidetyylin vaihto, piirtoikkunan avaaminen uudelleen).
 
 Varsinainen app-bundle on `onedir`-muodossa, joten sen sisäinen sisältö kuuluu pitää yhdessä appin kanssa normaalin macOS-jakelun tapaan.
 
