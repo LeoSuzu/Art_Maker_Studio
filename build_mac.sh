@@ -54,8 +54,7 @@ python -m pip install -r requirements.txt
 pyinstaller --noconfirm --clean art_maker_studio.spec
 
 # Package the .app into a drag-to-install disk image.
-VERSION="$(date +%Y%m%d)"
-DMG="dist/ArtMakerStudio-${VERSION}.dmg"
+DMG="dist/ArtMakerStudio.dmg"
 STAGING="$(mktemp -d)"
 cp -R dist/ArtMakerStudio.app "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
